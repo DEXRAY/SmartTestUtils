@@ -1,16 +1,5 @@
 package dev.dexray.smarttestutils;
 
-import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParserConfiguration;
-import com.github.javaparser.Position;
-import com.github.javaparser.Range;
-import com.github.javaparser.ast.CompilationUnit;
-import com.github.javaparser.ast.expr.Expression;
-import com.github.javaparser.ast.expr.MethodCallExpr;
-import com.github.javaparser.ast.stmt.BlockStmt;
-import com.github.javaparser.ast.stmt.ExpressionStmt;
-import com.github.javaparser.ast.stmt.SwitchEntry;
-
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -31,32 +20,28 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * Replaces a standalone {@code SmartTestUtils.createAsserts(object);} in a Maven test
  * source with AssertJ assertions for the object's current state. The root has depth 0;
- * at most three property accesses are followed. No assertion is executed on this run:
- * add the static AssertJ {@code assertThat} import, recompile and rerun the test to
- * verify the generated assertions. Imports are never modified automatically.
+ * at most three property accesses are followed. Recompile and rerun to execute the generated assertions.
  *
  * <p>The argument must be a variable or a field path without side effects. Public
  * JavaBean getters, record components and public instance fields are supported.
  * Getters must be safe to invoke, and accessible through the argument's declared type.
- * Test sources must be UTF-8 and compiled with source/line debug information.</p>
+ * Test sources must be UTF-8 and compiled with source file information.</p>
  *
  * <p>Set {@code -Dsmarttestutils.projectRoot=/path/to/project} to override automatic
  * discovery of {@code src/test/java} in the Maven module tree.</p>
  */
 public final class SmartTestUtils {
     private static final int MAX_DEPTH = 3;
-    private static final String ASSERT = "assertThat(";
-    private static final Map<Path, SourceEdits> SOURCE_EDITS = new java.util.HashMap<>();
-
-    private record Edit(int begin, int end, String replacement) {
-    }
-
-    private record SourceEdits(String baseline, String current, List<Edit> edits) {
-    }
+    private static final String ASSERT = "org.assertj.core.api.Assertions.assertThat(";
+    private static final String IDENTIFIER = "\\p{javaJavaIdentifierStart}\\p{javaJavaIdentifierPart}*";
+    private static final Pattern PLACEHOLDER = Pattern.compile(
+            "(?m)^([ \\t]*)(?:(?:dev\\.dexray\\.smarttestutils\\.)?SmartTestUtils\\.)?createAsserts\\h*\\(\\h*("
+                    + IDENTIFIER + "(?:\\." + IDENTIFIER + ")*)\\h*\\)\\h*;(?=\\h*(?://.*)?$)");
 
     private SmartTestUtils() {
     }
@@ -72,91 +57,33 @@ public final class SmartTestUtils {
         StackWalker.StackFrame caller = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
                 .walk(frames -> frames.filter(frame -> frame.getDeclaringClass() != SmartTestUtils.class)
                         .findFirst().orElseThrow(() -> new IllegalStateException("No calling test found")));
-        if (caller.getLineNumber() < 1 || caller.getFileName() == null) {
-            throw new IllegalStateException("Compile the calling test with source and line debug information");
+        if (caller.getFileName() == null) {
+            throw new IllegalStateException("Compile the calling test with source file information");
         }
         try {
-            Path source = findSource(caller).toRealPath();
-            String current = Files.readString(source, StandardCharsets.UTF_8);
-            SourceEdits state = SOURCE_EDITS.getOrDefault(source, new SourceEdits(current, current, List.of()));
-            if (!state.current().equals(current)) {
-                throw new IllegalStateException("Test source changed since capture; recompile and restart the tests");
+            Path source = findSource(caller);
+            String current = Files.readString(source);
+            var match = PLACEHOLDER.matcher(current);
+            if (!match.find()) {
+                throw new IllegalStateException("Expected a standalone createAsserts(variable); line in " + source);
             }
-            // Stack frames retain the ORIGINAL line numbers until the test is recompiled.
-            String original = state.baseline();
-            CompilationUnit unit = parse(original);
-            List<MethodCallExpr> calls = unit.findAll(MethodCallExpr.class).stream()
-                    .filter(call -> call.getNameAsString().equals("createAsserts"))
-                    .filter(call -> call.getArguments().size() == 1)
-                    .filter(call -> call.getRange().map(range -> range.begin.line <= caller.getLineNumber()
-                            && range.end.line >= caller.getLineNumber()).orElse(false))
-                    .toList();
-            if (calls.size() != 1) {
-                throw new IllegalStateException("Expected exactly one createAsserts call at "
-                        + source + ":" + caller.getLineNumber() + "; found " + calls.size());
+            var placeholder = match.toMatchResult();
+            if (match.find()) {
+                throw new IllegalStateException("Expected only one createAsserts placeholder in " + source);
             }
-            MethodCallExpr call = calls.get(0);
-            if (!(call.getParentNode().orElse(null) instanceof ExpressionStmt statement)) {
-                throw new IllegalArgumentException("createAsserts must be a standalone statement");
-            }
-            Expression argument = call.getArgument(0);
-            if (!stableExpression(argument)) {
-                throw new IllegalArgumentException("Use a variable or field path, e.g. createAsserts(object)");
-            }
-            Range range = statement.getRange().orElseThrow();
-            int begin = offset(original, range.begin);
-            int end = offset(original, range.end) + 1;
-            if (state.edits().stream().anyMatch(edit -> edit.begin() == begin)) {
-                throw new IllegalStateException("This createAsserts call was already captured; recompile and rerun "
-                        + "the test (loops and parameterized captures require separate placeholders)");
-            }
-            String expression = original.substring(offset(original, argument.getRange().orElseThrow().begin),
-                    offset(original, argument.getRange().orElseThrow().end) + 1);
             List<String> assertions = new ArrayList<>();
-            capture(object, expression, 0, new IdentityHashMap<>(), assertions);
-            String newline = original.contains("\r\n") ? "\r\n" : "\n";
-            int lineStart = original.lastIndexOf('\n', begin - 1) + 1;
-            String before = original.substring(lineStart, begin);
-            String indent = before.substring(0, before.length() - before.stripLeading().length());
-            boolean inBlock = statement.getParentNode().map(parent -> parent instanceof BlockStmt
-                    || parent instanceof SwitchEntry entry && entry.getType() == SwitchEntry.Type.STATEMENT_GROUP)
-                    .orElse(false);
-            String replacement = inBlock ? String.join(newline + indent, assertions)
+            capture(object, placeholder.group(2), 0, new IdentityHashMap<>(), assertions);
+            String indent = placeholder.group(1);
+            String newline = current.contains("\r\n") ? "\r\n" : "\n";
+            // A block keeps multiple assertions together even inside an unbraced if or loop.
+            String replacement = assertions.size() == 1 ? assertions.get(0)
                     : "{" + newline + indent + "    " + String.join(newline + indent + "    ", assertions)
                     + newline + indent + "}";
-            List<Edit> edits = new ArrayList<>(state.edits());
-            edits.add(new Edit(begin, end, replacement));
-            StringBuilder result = new StringBuilder(original);
-            edits.stream().sorted(Comparator.comparingInt(Edit::begin).reversed())
-                    .forEach(edit -> result.replace(edit.begin(), edit.end(), edit.replacement()));
-            String updated = result.toString();
-            parse(updated);
-            replaceSource(source, current, updated);
-            SOURCE_EDITS.put(source, new SourceEdits(original, updated, List.copyOf(edits)));
+            replaceSource(source, current, current.substring(0, placeholder.start()) + indent + replacement
+                    + current.substring(placeholder.end()));
         } catch (IOException e) {
             throw new IllegalStateException("Could not read or update the calling test source", e);
         }
-    }
-
-    private static CompilationUnit parse(String source) {
-        var parsed = new JavaParser(new ParserConfiguration()
-                .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17))
-                .parse(source);
-        if (!parsed.isSuccessful()) {
-            throw new IllegalStateException("Could not parse the Java test source: " + parsed.getProblems());
-        }
-        return parsed.getResult().filter(unit -> !unit.getTypes().isEmpty())
-                .orElseThrow(() -> new IllegalStateException("Could not parse the Java test source"));
-    }
-
-    private static boolean stableExpression(Expression expression) {
-        if (expression.isNameExpr() || expression.isThisExpr() || expression.isSuperExpr()) {
-            return true;
-        }
-        if (expression.isFieldAccessExpr()) {
-            return stableExpression(expression.asFieldAccessExpr().getScope());
-        }
-        return expression.isEnclosedExpr() && stableExpression(expression.asEnclosedExpr().getInner());
     }
 
     private static Path findSource(StackWalker.StackFrame caller) throws IOException {
@@ -232,7 +159,7 @@ public final class SmartTestUtils {
     private static void capture(Object value, String expression, int depth,
             IdentityHashMap<Object, String> visited, List<String> assertions) {
         if (value == null) {
-            assertions.add(ASSERT + expression + ").isNull();");
+            assertions.add(ASSERT + expression + ").isEqualTo((Object) null);");
             return;
         }
         String literal = literal(value);
@@ -242,11 +169,11 @@ public final class SmartTestUtils {
         }
         String first = visited.get(value);
         if (first != null) {
-            assertions.add(ASSERT + expression + ").isSameAs(" + first + ");");
+            assertions.add(ASSERT + expression + " == " + first + ").isEqualTo(true);");
             return;
         }
         visited.put(value, expression);
-        assertions.add(ASSERT + expression + ").isNotNull();");
+        assertions.add(ASSERT + expression + " != null).isEqualTo(true);");
         if (depth == MAX_DEPTH) {
             return;
         }
@@ -376,16 +303,6 @@ public final class SmartTestUtils {
             }
         }
         return result.append(delimiter).toString();
-    }
-
-    private static int offset(String source, Position position) {
-        int offset = 0;
-        for (int line = 1; line < position.line; line++) {
-            int newline = source.indexOf('\n', offset);
-            if (newline < 0) throw new IllegalStateException("Invalid source position");
-            offset = newline + 1;
-        }
-        return offset + position.column - 1;
     }
 
     private static void replaceSource(Path source, String original, String updated) throws IOException {

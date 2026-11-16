@@ -80,7 +80,8 @@ class SmartTestUtilsIntegrationTest {
                 .doesNotContain("SmartTestUtils.createAsserts(bean);")
                 .contains("assertThat(")
                 .contains("bean.getName()", "TestName", "bean.getChild().getDeep().getLabel()", "Depth3")
-                .contains("isSameAs(")
+                .contains(" == bean).isEqualTo(true)", "isEqualTo((Object) null)")
+                .doesNotContain(".isSameAs(", ".isNotNull(", ".isNull(")
                 .doesNotContain("getFurther().getExplodes()", "bean.getShared().getDeep()", "bean.getSelf().getName()");
 
         compile(source);
@@ -93,14 +94,15 @@ class SmartTestUtilsIntegrationTest {
     }
 
     @Test
-    void refusesAmbiguousCallsOnSameLineWithoutChangingSource() throws Exception {
+    void refusesMultiplePlaceholdersWithoutChangingSource() throws Exception {
         Path source = writeFixture("""
                 package generated;
                 import dev.dexray.smarttestutils.SmartTestUtils;
                 public class Fixture {
                     public static void run() {
                         String value = "value";
-                        SmartTestUtils.createAsserts(value); SmartTestUtils.createAsserts(value);
+                        SmartTestUtils.createAsserts(value);
+                        SmartTestUtils.createAsserts(value);
                     }
                 }
                 """);
@@ -108,7 +110,7 @@ class SmartTestUtilsIntegrationTest {
     }
 
     @Test
-    void leavesAssertJImportForTheUserToAdd() throws Throwable {
+    void generatedAssertionsRunWithoutAnAssertJImport() throws Throwable {
         Path source = writeFixture("""
                 package generated;
                 import dev.dexray.smarttestutils.SmartTestUtils;
@@ -116,100 +118,6 @@ class SmartTestUtilsIntegrationTest {
                     public static void run() {
                         String value = "Snapshot";
                         SmartTestUtils.createAsserts(value);
-                    }
-                }
-                """);
-        String importLine = "import static org.assertj.core.api.Assertions.assertThat;\n";
-        Files.writeString(source, Files.readString(source).replace(importLine, ""));
-        compile(source);
-        try (URLClassLoader loader = fixtureLoader()) {
-            invoke(loader, "run");
-        }
-        String generated = Files.readString(source);
-        assertThat(generated).contains("assertThat(value).isEqualTo(\"Snapshot\")")
-                .doesNotContain("org.assertj", "SmartTestUtils.createAsserts(value)");
-
-        Files.writeString(source, generated.replace("package generated;", "package generated;\n" + importLine));
-        compile(source);
-        try (URLClassLoader loader = fixtureLoader()) {
-            invoke(loader, "run");
-        }
-    }
-
-    @Test
-    void rewritesExpressionLambdaIntoCompilableBlock() throws Throwable {
-        Path source = writeFixture("""
-                package generated;
-                import dev.dexray.smarttestutils.SmartTestUtils;
-                public class Fixture {
-                    public static void run() {
-                        String value = "value";
-                        Runnable action = () -> SmartTestUtils.createAsserts(value);
-                        action.run();
-                    }
-                }
-                """);
-        rewriteAndVerify(source);
-    }
-
-    @Test
-    void replacesMultipleCallsAtTheirOriginalCompiledLineNumbers() throws Throwable {
-        Path source = writeFixture("""
-                package generated;
-                import dev.dexray.smarttestutils.SmartTestUtils;
-                public class Fixture {
-                    public static void run() {
-                        Bean bean = new Bean();
-                        SmartTestUtils.createAsserts(bean);
-                        String second = "second";
-                        SmartTestUtils.createAsserts(second);
-                    }
-                    public static class Bean {
-                        public String getName() { return "first"; }
-                        public int getNumber() { return 123; }
-                    }
-                }
-                """);
-        rewriteAndVerify(source);
-        assertThat(Files.readString(source)).contains("bean.getName()", "second).isEqualTo(\"second\")");
-    }
-
-    @Test
-    void rewritesMultilineCallsAndPreservesLaterCompiledLineNumbers() throws Throwable {
-        Path source = writeFixture("""
-                package generated;
-                import dev.dexray.smarttestutils.SmartTestUtils;
-                public class Fixture {
-                    public static void run() {
-                        Bean bean = new Bean();
-                        SmartTestUtils.createAsserts(
-                                bean);
-                        String second = "second";
-                        SmartTestUtils.createAsserts(
-                                second);
-                    }
-                    public static class Bean {
-                        public String getName() { return "first"; }
-                        public int getNumber() { return 123; }
-                    }
-                }
-                """);
-        rewriteAndVerify(source);
-        assertThat(Files.readString(source)).contains("bean.getName()", "second).isEqualTo(\"second\")");
-    }
-
-    @Test
-    void rewritesSingleStatementIfIntoCompilableBlock() throws Throwable {
-        Path source = writeFixture("""
-                package generated;
-                import dev.dexray.smarttestutils.SmartTestUtils;
-                public class Fixture {
-                    public static void run() {
-                        Bean bean = new Bean();
-                        if (true) SmartTestUtils.createAsserts(bean);
-                    }
-                    public static class Bean {
-                        public String getName() { return "value"; }
                     }
                 }
                 """);
@@ -416,10 +324,7 @@ class SmartTestUtilsIntegrationTest {
     private Path writeFixture(String contents) throws IOException {
         Path source = project.resolve("src/test/java/generated/Fixture.java");
         Files.createDirectories(source.getParent());
-        String newline = contents.contains("\r\n") ? "\r\n" : "\n";
-        String withUserImport = contents.replace("package generated;", "package generated;" + newline
-                + "import static org.assertj.core.api.Assertions.assertThat;");
-        Files.writeString(source, withUserImport, StandardCharsets.UTF_8);
+        Files.writeString(source, contents, StandardCharsets.UTF_8);
         return source;
     }
 

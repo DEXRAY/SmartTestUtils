@@ -7,7 +7,7 @@ direkt in den Quelltext eines Maven-Tests schreibt. Die Implementierung besteht 
 ## Voraussetzungen und Build
 
 - JDK 17 oder neuer, Maven 3.9 oder neuer
-- Testquellen unter `src/test/java`, mit UTF-8 und Debug-Informationen für Quelldatei und Zeilennummern
+- Testquellen unter `src/test/java`, mit UTF-8 und Quelldateinamen in den Debug-Informationen
 - AssertJ im Test-Classpath des verwendenden Projekts
 
 ```sh
@@ -38,7 +38,7 @@ Nach `mvn install` kann die Bibliothek in einem anderen Maven-Projekt eingebunde
 </dependency>
 ```
 
-Im Test einen Platzhalter einfügen:
+Im Test genau eine Platzhalterzeile einfügen:
 
 ```java
 import dev.dexray.smarttestutils.SmartTestUtils;
@@ -51,20 +51,17 @@ SmartTestUtils.createAsserts(object);
 Beim Ausführen wird ausschließlich die Platzhalter-Anweisung ersetzt, beispielsweise durch:
 
 ```java
-assertThat(object).isNotNull();
-assertThat(object.getAge()).isEqualTo(42);
-assertThat(object.getName()).isEqualTo("TestName");
+{
+    org.assertj.core.api.Assertions.assertThat(object != null).isEqualTo(true);
+    org.assertj.core.api.Assertions.assertThat(object.getAge()).isEqualTo(42);
+    org.assertj.core.api.Assertions.assertThat(object.getName()).isEqualTo("TestName");
+}
 ```
 
-Den Import anschließend selbst ergänzen, falls er noch fehlt:
-
-```java
-import static org.assertj.core.api.Assertions.assertThat;
-```
-
-**Danach den Test erneut kompilieren und ausführen.** Der erste Durchlauf erfasst Werte und
-ändert den Quelltext; erst der nächste Durchlauf überprüft die generierten Assertions.
-Die Klasse verändert keine Imports. Die erzeugten Festwerte vor dem Übernehmen fachlich prüfen.
+**Den Test erneut kompilieren und ausführen**, etwa mit einem zweiten `mvn test`.
+Der erste Lauf erfasst die Werte per Reflection. Der zweite Lauf prüft sie.
+Die generierten Assertions verwenden voll qualifizierte Namen und benötigen daher keinen
+zusätzlichen Import. Der Generator selbst verwendet ausschließlich das JDK.
 
 ## Unterstützte Properties und Werte
 
@@ -83,38 +80,24 @@ Strings und Zeichen werden als escapte Java-Literale geschrieben, Enums mit qual
 Das Wurzelobjekt hat Tiefe 0. Es werden höchstens drei Property-Zugriffe verfolgt,
 beispielsweise `object.getAddress().getCity().getName()`. Komplexe Objekte an der Tiefengrenze
 werden nur auf ihren Nullzustand geprüft. Eine Identitätsprüfung erkennt Zyklen und gemeinsame
-Referenzen: Wiederholte Referenzen erhalten `isSameAs(...)`, ihre Properties werden nicht erneut gelesen.
+Referenzen: Wiederholte Referenzen werden mit `assertThat(a == b).isEqualTo(true)` geprüft, ihre Properties werden nicht erneut gelesen.
 
 ## Quelltext-Suche und Grenzen
 
-Die aufrufende Klasse und Zeile werden über `StackWalker` ermittelt. Zuerst wird das zum
-`target/test-classes`-Verzeichnis gehörende Maven-Modul geprüft, anschließend die Maven-Projektstruktur.
-Auch verschachtelte Testklassen und mehrere Platzhalter auf verschiedenen Zeilen werden unterstützt.
-Bei abweichenden Arbeitsverzeichnissen lässt sich die Suche explizit steuern:
+Der Generator ermittelt die aufrufende Testdatei über den Stack und sucht den Platzhalter
+per Volltextsuche. Schreibe den Aufruf einmal pro Datei als eigene, einzeilige Anweisung.
+Das Argument muss eine Variable oder ein Feldpfad wie `this.object` sein. Der erste
+Lauf darf den Platzhalter nur einmal ausführen. Kommentare und Textblöcke dürfen keine
+identisch aussehende Platzhalterzeile enthalten.
+
+Die Quelldatei wird im Maven-Modul unter `src/test/java` gesucht. Für abweichende
+Arbeitsverzeichnisse kann die Projektwurzel vorgegeben werden:
 
 ```sh
 mvn -Dsmarttestutils.projectRoot=/pfad/zum/projekt test
 ```
 
-- Der Aufruf muss eine eigenständige Anweisung sein. Auch einzelne `if`-/Schleifen-Anweisungen
-  und `Runnable`-Lambdas werden durch einen Block sicher erweitert.
-- Das Argument muss eine Variable oder ein Feldpfad sein, z. B. `object` oder `this.object`.
-  Methodenaufrufe wie `createAsserts(loadObject())` werden abgelehnt, damit spätere Assertions
-  keine Seiteneffekte mehrfach auslösen.
-- Getter müssen deterministisch sein und dürfen keine Seiteneffekte haben. Sie müssen über
-  den deklarierten Typ der Variablen erreichbar sein. Zusätzliche Getter einer Laufzeit-Unterklasse
-  erfordern gegebenenfalls eine passend typisierte Variable.
-- Collections, Maps, Arrays und weitere nicht unterstützte JDK-Objekte benötigen eigene Assertions.
-  Sie werden vor Erreichen der Tiefengrenze mit einer Fehlermeldung abgelehnt.
-- Mehrere Platzhalter auf derselben Zeile sind mehrdeutig und werden abgelehnt. Derselbe Platzhalter
-  darf pro JVM nur einmal ausgeführt werden; für Schleifen und parametrisierte Tests ist ein separater,
-  einmaliger Erfassungslauf nötig.
-- Vor dem Schreiben werden alle Werte erfasst und der erzeugte Quelltext geparst. Bei einem
-  Getter-/Generierungsfehler bleibt die betreffende Ersetzung aus. Kommentare außerhalb der
-  ersetzten Anweisung, Einrückungen und LF-/CRLF-Zeilenenden bleiben erhalten.
-- Externe Änderungen seit einer Erfassung führen zum Abbruch. Die Datei wird atomar ersetzt;
-  das Dateisystem muss atomare Umbenennungen unterstützen. Quelltextänderungen während eines
-  Erfassungslaufs vermeiden und die Änderungen anschließend im Git-Diff prüfen. Nach manuellen
-  Änderungen oder einer Neukompilierung den Testprozess neu starten.
-
-Der Parser unterstützt Java-17-Syntax; neuere Java-Sprachkonstrukte in Testquellen sind nicht unterstützt.
+Getter müssen über den deklarierten Typ der Variablen erreichbar sein und deterministische
+Werte liefern. Collections, Maps und Arrays benötigen eigene Assertions. Der Generator
+liest zuerst alle Werte und ersetzt die Datei anschließend atomar. Scheitert ein Getter,
+bleibt der Platzhalter für den nächsten Versuch erhalten.

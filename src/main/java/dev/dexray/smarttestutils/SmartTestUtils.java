@@ -65,8 +65,10 @@ public final class SmartTestUtils {
     private static final String ASSERTIONS = "org.assertj.core.api.Assertions";
     private static final String TUPLE = "org.assertj.core.groups.Tuple";
     private static final String IDENTIFIER = "\\p{javaJavaIdentifierStart}\\p{javaJavaIdentifierPart}*";
+    // Only "SmartTestUtils.createAsserts(...)" is replaced, independent of the package this class was
+    // copied to; the test imports SmartTestUtils from its local package (no static import).
     private static final Pattern PLACEHOLDER = Pattern.compile(
-            "(?m)^([ \\t]*)(?:(?:dev\\.dexray\\.smarttestutils\\.)?SmartTestUtils\\.)?createAsserts\\h*\\(\\h*("
+            "(?m)^([ \\t]*)SmartTestUtils\\.createAsserts\\h*\\(\\h*("
                     + IDENTIFIER + "(?:\\." + IDENTIFIER + ")*)\\h*\\)\\h*;(?=\\h*(?://.*)?$)");
     private static final Pattern PACKAGE = Pattern.compile("(?m)^\\h*package\\h+[^;]+;\\h*(?:\\r?\\n)?");
     private static final Pattern IMPORT = Pattern.compile(

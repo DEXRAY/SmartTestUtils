@@ -129,6 +129,12 @@ Property per Kommentar ausgelassen.
 
 ## Quelltext-Suche und Grenzen
 
+Ersetzt wird ausschließlich die Anweisung `SmartTestUtils.createAsserts(...);`, unabhängig vom
+Paket der Klasse. `SmartTestUtils.java` kann daher auch ohne JAR direkt in ein beliebiges Paket
+des eigenen Projekts kopiert werden (nur die `package`-Zeile anpassen); der Test importiert die
+Klasse dann aus diesem Paket. Ein statischer Import (`createAsserts(object);`) oder ein voll
+qualifizierter Aufruf wird nicht erkannt.
+
 Der Generator ermittelt die aufrufende Testdatei über den Stack und sucht den Platzhalter
 per Volltextsuche. Schreibe den Aufruf einmal pro Datei als eigene, einzeilige Anweisung.
 Das Argument muss eine Variable oder ein Feldpfad wie `this.object` sein. Der erste

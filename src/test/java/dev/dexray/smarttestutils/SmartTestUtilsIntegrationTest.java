@@ -625,6 +625,41 @@ class SmartTestUtilsIntegrationTest {
         assertThat(Files.readString(source)).contains("assertThat(value).isEqualTo(\"quarkus\");");
     }
 
+    @Test
+    void worksWhenTheSourceIsCopiedIntoAnotherPackage() throws Throwable {
+        String copied = Files.readString(Path.of("src/main/java/dev/dexray/smarttestutils/SmartTestUtils.java"))
+                .replace("package dev.dexray.smarttestutils;", "package testsupport;");
+        assertThat(copied).doesNotContain("dexray");
+        Path utils = writeSource("testsupport/SmartTestUtils.java", copied);
+        Path source = writeFixture("""
+                package generated;
+                import testsupport.SmartTestUtils;
+                public class Fixture {
+                    public static void run() {
+                        String value = "kopiert";
+                        SmartTestUtils.createAsserts(value);
+                    }
+                }
+                """);
+        rewriteAndVerify(source, utils);
+        assertThat(Files.readString(source)).contains("assertThat(value).isEqualTo(\"kopiert\");");
+    }
+
+    @Test
+    void ignoresCallsWithoutTheSmartTestUtilsClassName() throws Exception {
+        Path source = writeFixture("""
+                package generated;
+                import static dev.dexray.smarttestutils.SmartTestUtils.createAsserts;
+                public class Fixture {
+                    public static void run() {
+                        String value = "value";
+                        createAsserts(value);
+                    }
+                }
+                """);
+        assertRewriteRejectedWithoutChanges(source);
+    }
+
     private static void restoreProjectRoot(String previous) {
         if (previous == null) {
             System.clearProperty("smarttestutils.projectRoot");

@@ -157,20 +157,9 @@ public final class SmartTestUtils {
         if (override != null && !override.isBlank()) {
             return searchProject(Path.of(override).toAbsolutePath().normalize(), relative);
         }
-        // Maven test classes identify their module even when user.dir is the reactor root.
-        var protection = caller.getDeclaringClass().getProtectionDomain();
-        if (protection != null && protection.getCodeSource() != null) {
-            try {
-                Path classes = Path.of(protection.getCodeSource().getLocation().toURI());
-                if (classes.endsWith(Path.of("target", "test-classes"))) {
-                    Path candidate = classes.getParent().getParent().resolve("src/test/java").resolve(relative);
-                    if (Files.isRegularFile(candidate)) {
-                        return candidate;
-                    }
-                }
-            } catch (java.net.URISyntaxException | IllegalArgumentException ignored) {
-                // Fall back to Maven project discovery for other class loaders.
-            }
+        Path fromClasses = fromTestClasses(caller.getDeclaringClass(), relative);
+        if (fromClasses != null) {
+            return fromClasses;
         }
         Path directory = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
         for (Path parent = directory; parent != null; parent = parent.getParent()) {
@@ -184,6 +173,32 @@ public final class SmartTestUtils {
         }
         throw new IllegalStateException("Cannot locate src/test/java/" + relative
                 + "; set smarttestutils.projectRoot to the Maven project root");
+    }
+
+    /**
+     * Maven test classes identify their module even when user.dir is the reactor root. Other
+     * class loaders (e.g. Quarkus) may provide no code source, a null location or a non-file URL;
+     * any failure here falls back to the project discovery via user.dir.
+     */
+    private static Path fromTestClasses(Class<?> caller, String relative) {
+        try {
+            var protection = caller.getProtectionDomain();
+            var codeSource = protection == null ? null : protection.getCodeSource();
+            var location = codeSource == null ? null : codeSource.getLocation();
+            if (location == null) {
+                return null;
+            }
+            Path classes = Path.of(location.toURI());
+            if (classes.endsWith(Path.of("target", "test-classes"))) {
+                Path candidate = classes.getParent().getParent().resolve("src/test/java").resolve(relative);
+                if (Files.isRegularFile(candidate)) {
+                    return candidate;
+                }
+            }
+        } catch (Exception | LinkageError ignored) {
+            // Fall back to Maven project discovery.
+        }
+        return null;
     }
 
     private static Path searchProject(Path root, String relative) throws IOException {

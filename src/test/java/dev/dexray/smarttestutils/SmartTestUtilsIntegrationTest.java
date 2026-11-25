@@ -590,6 +590,41 @@ class SmartTestUtilsIntegrationTest {
         assertThat(Files.readString(second)).isEqualTo(before);
     }
 
+    @Test
+    void fallsBackToWorkingDirectoryWhenCodeSourceLocationIsNull() throws Throwable {
+        Path source = writeFixture("""
+                package generated;
+                import dev.dexray.smarttestutils.SmartTestUtils;
+                public class Fixture {
+                    public static void run() {
+                        String value = "quarkus";
+                        SmartTestUtils.createAsserts(value);
+                    }
+                }
+                """);
+        compile(source);
+        byte[] bytes = Files.readAllBytes(project.resolve("target/test-classes/generated/Fixture.class"));
+        // Like Quarkus, define the class without a code source location.
+        ClassLoader loader = new ClassLoader(getClass().getClassLoader()) {
+            @Override
+            protected Class<?> findClass(String name) throws ClassNotFoundException {
+                if (!name.equals("generated.Fixture")) {
+                    throw new ClassNotFoundException(name);
+                }
+                return defineClass(name, bytes, 0, bytes.length);
+            }
+        };
+        assertThat(loader.loadClass("generated.Fixture").getProtectionDomain().getCodeSource().getLocation()).isNull();
+        String previous = System.getProperty("user.dir");
+        try {
+            System.setProperty("user.dir", project.toString());
+            invoke(loader, "run");
+        } finally {
+            System.setProperty("user.dir", previous);
+        }
+        assertThat(Files.readString(source)).contains("assertThat(value).isEqualTo(\"quarkus\");");
+    }
+
     private static void restoreProjectRoot(String previous) {
         if (previous == null) {
             System.clearProperty("smarttestutils.projectRoot");

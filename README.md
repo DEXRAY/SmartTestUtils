@@ -52,35 +52,67 @@ Beim Ausführen wird ausschließlich die Platzhalter-Anweisung ersetzt, beispiel
 
 ```java
 {
-    org.assertj.core.api.Assertions.assertThat(object != null).isEqualTo(true);
-    org.assertj.core.api.Assertions.assertThat(object.getAge()).isEqualTo(42);
-    org.assertj.core.api.Assertions.assertThat(object.getName()).isEqualTo("TestName");
+    assertThat(order.getNumber()).isEqualTo("A-1");
+    assertThat(order.isPaid()).isTrue();
+    assertThat(order.getStatus()).isEqualTo(Status.OPEN);
+
+    assertThat(order.getCustomer().getName()).isEqualTo("Kunde");
+
+    assertThat(order.getItems()).hasSize(2);
+    assertThat(order.getItems())
+            .extracting(Item::isActive, Item::getName, Item::getStatus)
+            .contains(
+                    Tuple.tuple(true, "Apfel", Status.OPEN),
+                    Tuple.tuple(false, "Birne", Status.CLOSED));
 }
 ```
 
+Fehlende Imports (z. B. `import static org.assertj.core.api.Assertions.assertThat;`,
+`import org.assertj.core.groups.Tuple;` oder verwendete Enums und Element-Klassen) werden direkt
+unter der `package`-Deklaration eingefügt. Der generierte Code enthält keine Paketnamen.
+Nur wenn ein einfacher Name bereits durch einen anderen Import oder eine Typdeklaration in der
+Testdatei belegt ist, wird ausnahmsweise der voll qualifizierte Name geschrieben. Ist bereits ein
+anderes statisches `assertThat` (z. B. Hamcrest) importiert, wird `Assertions.assertThat(...)` verwendet.
+
 **Den Test erneut kompilieren und ausführen**, etwa mit einem zweiten `mvn test`.
 Der erste Lauf erfasst die Werte per Reflection. Der zweite Lauf prüft sie.
-Die generierten Assertions verwenden voll qualifizierte Namen und benötigen daher keinen
-zusätzlichen Import. Der Generator selbst verwendet ausschließlich das JDK.
+Der Generator selbst verwendet ausschließlich das JDK.
 
 ## Unterstützte Properties und Werte
 
-- Öffentliche JavaBean-Getter (`getName()`, `isEnabled()`), einschließlich geerbter Getter
-- Record-Komponenten und öffentliche Instanzfelder; statische Member werden ausgelassen
-- `String`, `char`, `boolean`, primitive Zahlentypen und ihre Wrapper, einschließlich `null`,
-  `NaN` und Unendlichkeiten
-- Enums, `BigDecimal`, `BigInteger`, `UUID`
-- `java.time`: `LocalDate`, `LocalTime`, `LocalDateTime`, `OffsetTime`, `OffsetDateTime`,
-  `ZonedDateTime`, `Instant`, `Duration`, `Period`, `Year`, `YearMonth`, `MonthDay`, `ZoneId`
+- Assertions werden nur für `String`, `boolean`/`Boolean` und Enums erzeugt (`isEqualTo`,
+  `isTrue`/`isFalse`, `isNull`). Andere Werte (Zahlen, Datumswerte, `char`, Maps, Arrays, ...)
+  werden ignoriert.
+- Es werden ausschließlich öffentliche Properties verwendet: öffentliche JavaBean-Getter
+  (`getName()`, `isEnabled()`), einschließlich geerbter Getter, Record-Komponenten und öffentliche
+  Instanzfelder. Statische, geschützte, package-private und private Member werden ausgelassen.
+- Member, die von Persistenz-Proxies oder Bytecode-Enhancement stammen, werden nicht ausgewertet:
+  Bei Proxy-Klassen (z. B. `Entity$HibernateProxy$...`, ByteBuddy, Javassist, CGLIB) wird die
+  eigentliche Entity-Klasse analysiert; Member mit `$` im Namen und Member, die in Klassen von
+  JDK, Jakarta, Hibernate, ByteBuddy, Javassist, Spring, EclipseLink oder OpenJPA deklariert sind
+  (z. B. `HibernateProxy.isSession()`), werden übersprungen.
 
 Properties werden alphabetisch ausgegeben. Getter haben Vorrang vor gleichnamigen Feldern;
-bei booleschen Properties hat `isX()` Vorrang vor `getX()`. `getClass()` wird ausgelassen.
-Strings und Zeichen werden als escapte Java-Literale geschrieben, Enums mit qualifiziertem Typnamen.
+bei booleschen Properties hat `isX()` Vorrang vor `getX()`.
 
-Das Wurzelobjekt hat Tiefe 0. Es werden höchstens drei Property-Zugriffe verfolgt,
-beispielsweise `object.getAddress().getCity().getName()`. Komplexe Objekte an der Tiefengrenze
-werden nur auf ihren Nullzustand geprüft. Eine Identitätsprüfung erkennt Zyklen und gemeinsame
-Referenzen: Wiederholte Referenzen werden mit `assertThat(a == b).isEqualTo(true)` geprüft, ihre Properties werden nicht erneut gelesen.
+### Verschachtelte Objekte und Collections
+
+Das Wurzelobjekt hat Tiefe 0. Verschachtelte Objekte werden rekursiv ausgewertet, höchstens drei
+Property-Zugriffe tief, beispielsweise `object.getAddress().getCity().getName()`. Jedes Objekt
+und jede Collection bildet eine eigene Gruppe von Assertions; Gruppen sind durch eine Leerzeile
+getrennt. Ein Objekt, für das bereits Assertions erzeugt wurden, wird nicht erneut ausgewertet,
+so dass Referenzzyklen und gemeinsam genutzte Referenzen keine doppelten Assertions erzeugen.
+
+Für eine Collection wird zuerst `hasSize(n)` bzw. `isEmpty()` erzeugt. Anschließend:
+
+- Elemente vom Typ `String`, `Boolean` oder Enum: `contains(...)` mit allen Werten.
+- Andere Elemente: `extracting(...)` mit Methodenreferenzen auf alle `String`-, `boolean`- und
+  Enum-Properties der Element-Klasse und `contains(Tuple.tuple(...), ...)` (bei nur einer Property
+  ohne `Tuple`). Öffentliche Felder werden über ein Lambda extrahiert.
+
+Die Element-Klasse wird aus dem generischen Rückgabetyp des Getters bestimmt (`List<Item>`),
+sonst aus der gemeinsamen Klasse der Elemente. Die Elemente selbst werden nicht weiter rekursiv
+ausgewertet. Enthält die Collection `null`-Elemente, wird nur die Größe geprüft.
 
 ## Quelltext-Suche und Grenzen
 
@@ -98,6 +130,7 @@ mvn -Dsmarttestutils.projectRoot=/pfad/zum/projekt test
 ```
 
 Getter müssen über den deklarierten Typ der Variablen erreichbar sein und deterministische
-Werte liefern. Collections, Maps und Arrays benötigen eigene Assertions. Der Generator
+Werte liefern. Ist die Wurzel selbst eine Collection, muss die Variable mit dem passenden
+Elementtyp deklariert sein (z. B. `List<Item>`). Maps und Arrays benötigen eigene Assertions. Der Generator
 liest zuerst alle Werte und ersetzt die Datei anschließend atomar. Scheitert ein Getter,
 bleibt der Platzhalter für den nächsten Versuch erhalten.

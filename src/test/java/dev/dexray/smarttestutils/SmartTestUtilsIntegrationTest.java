@@ -62,6 +62,7 @@ class SmartTestUtilsIntegrationTest {
                     }
                     public static class Deep {
                         public String getLabel() { return "Depth3"; }
+                        public boolean isVisible() { return false; }
                         public TooDeep getFurther() { return new TooDeep(); }
                     }
                     public static class TooDeep {
@@ -77,12 +78,24 @@ class SmartTestUtilsIntegrationTest {
 
         String rewritten = Files.readString(source);
         assertThat(rewritten)
+                .startsWith("package generated;\n\nimport static org.assertj.core.api.Assertions.assertThat;\n"
+                        + "import dev.dexray.smarttestutils.SmartTestUtils;\n")
                 .doesNotContain("SmartTestUtils.createAsserts(bean);")
-                .contains("assertThat(")
-                .contains("bean.getName()", "TestName", "bean.getChild().getDeep().getLabel()", "Depth3")
-                .contains(" == bean).isEqualTo(true)", "isEqualTo((Object) null)")
-                .doesNotContain(".isSameAs(", ".isNotNull(", ".isNull(")
-                .doesNotContain("getFurther().getExplodes()", "bean.getShared().getDeep()", "bean.getSelf().getName()");
+                .contains("""
+                                {
+                                    assertThat(bean.getAbsent()).isNull();
+                                    assertThat(bean.isEnabled()).isTrue();
+                                    assertThat(bean.getEscaped()).isEqualTo("Zeile\\n\\"Zitat\\"\\\\Pfad");
+                                    assertThat(bean.getName()).isEqualTo("TestName");
+                                    assertThat(bean.getState()).isEqualTo(State.READY);
+
+                                    assertThat(bean.getChild().getDeep().getLabel()).isEqualTo("Depth3");
+                                    assertThat(bean.getChild().getDeep().isVisible()).isFalse();
+                                }
+                        """);
+        assertThat(generatedBlock(rewritten)).doesNotContain("org.", "generated.", "java.")
+                .doesNotContain("getIntValue", "getCharValue", "getNaN", "getBoxedValue", "getNegativeZero")
+                .doesNotContain("getFurther()", "bean.getShared()", "bean.getSelf()", " == ");
 
         compile(source);
         try (URLClassLoader loader = fixtureLoader()) {
@@ -110,10 +123,12 @@ class SmartTestUtilsIntegrationTest {
     }
 
     @Test
-    void generatedAssertionsRunWithoutAnAssertJImport() throws Throwable {
+    void addsMissingAssertJImportBelowPackageDeclaration() throws Throwable {
         Path source = writeFixture("""
                 package generated;
+
                 import dev.dexray.smarttestutils.SmartTestUtils;
+
                 public class Fixture {
                     public static void run() {
                         String value = "Snapshot";
@@ -122,6 +137,208 @@ class SmartTestUtilsIntegrationTest {
                 }
                 """);
         rewriteAndVerify(source);
+        assertThat(Files.readString(source)).isEqualTo("""
+                package generated;
+
+                import static org.assertj.core.api.Assertions.assertThat;
+                import dev.dexray.smarttestutils.SmartTestUtils;
+
+                public class Fixture {
+                    public static void run() {
+                        String value = "Snapshot";
+                        assertThat(value).isEqualTo("Snapshot");
+                    }
+                }
+                """);
+    }
+
+    @Test
+    void reusesExistingImportsAndQualifiesOnlyOnConflicts() throws Throwable {
+        writeSource("other/State.java", """
+                package other;
+                public enum State { ACTIVE }
+                """);
+        Path source = writeFixture("""
+                package generated;
+                import static org.assertj.core.api.Assertions.*;
+                import dev.dexray.smarttestutils.SmartTestUtils;
+                public class Fixture {
+                    public enum State { READY }
+                    public static class Bean {
+                        public State getLocal() { return State.READY; }
+                        public other.State getForeign() { return other.State.ACTIVE; }
+                    }
+                    public static void run() {
+                        Bean bean = new Bean();
+                        SmartTestUtils.createAsserts(bean);
+                    }
+                }
+                """);
+        rewriteAndVerify(source, project.resolve("src/test/java/other/State.java"));
+        String rewritten = Files.readString(source);
+        assertThat(rewritten)
+                .startsWith("package generated;\nimport static org.assertj.core.api.Assertions.*;")
+                .contains("assertThat(bean.getLocal()).isEqualTo(State.READY);",
+                        "assertThat(bean.getForeign()).isEqualTo(other.State.ACTIVE);")
+                .doesNotContain("import other.State;", "import static org.assertj.core.api.Assertions.assertThat;");
+    }
+
+    @Test
+    void generatesCollectionAssertionsWithExtractingAndTuples() throws Throwable {
+        writeSource("model/Status.java", """
+                package model;
+                public enum Status { OPEN, CLOSED }
+                """);
+        writeSource("model/Item.java", """
+                package model;
+                public class Item {
+                    private final String name;
+                    private final Status status;
+                    private final boolean active;
+                    public Item(String name, Status status, boolean active) {
+                        this.name = name;
+                        this.status = status;
+                        this.active = active;
+                    }
+                    public String getName() { return name; }
+                    public Status getStatus() { return status; }
+                    public boolean isActive() { return active; }
+                    public int getPriority() { return 7; }
+                    protected String getInternal() { return "hidden"; }
+                }
+                """);
+        Path source = writeFixture("""
+                package generated;
+                import dev.dexray.smarttestutils.SmartTestUtils;
+                import java.util.List;
+                import java.util.Set;
+                import model.Item;
+                import model.Status;
+                public class Fixture {
+                    public static boolean changed;
+                    public static class Order {
+                        private final List<Item> items = List.of(new Item("Apfel", Status.OPEN, true),
+                                new Item(changed ? "Birne" : null, Status.CLOSED, false));
+                        public String getNumber() { return "A-1"; }
+                        public List<Item> getItems() { return items; }
+                        public List<Item> getSameItems() { return items; }
+                        public List<Status> getHistory() { return List.of(Status.OPEN, Status.CLOSED); }
+                        public Set<String> getTags() { return Set.of("eilig"); }
+                        public List<Label> getLabels() { return List.of(new Label("rot")); }
+                        public List<Item> getNone() { return List.of(); }
+                        public List<Integer> getNumbers() { return List.of(1, 2); }
+                    }
+                    public record Label(String text) {}
+                    public static void run() {
+                        Order order = new Order();
+                        SmartTestUtils.createAsserts(order);
+                    }
+                }
+                """);
+        Path item = project.resolve("src/test/java/model/Item.java");
+        Path status = project.resolve("src/test/java/model/Status.java");
+        compile(source, item, status);
+        try (URLClassLoader loader = fixtureLoader()) {
+            invoke(loader, "run");
+        }
+        String rewritten = Files.readString(source);
+        assertThat(rewritten)
+                .startsWith("""
+                        package generated;
+
+                        import static org.assertj.core.api.Assertions.assertThat;
+                        import org.assertj.core.groups.Tuple;
+                        import dev.dexray.smarttestutils.SmartTestUtils;
+                        """)
+                .contains("""
+                                {
+                                    assertThat(order.getNumber()).isEqualTo("A-1");
+
+                                    assertThat(order.getHistory()).hasSize(2);
+                                    assertThat(order.getHistory()).contains(Status.OPEN, Status.CLOSED);
+
+                                    assertThat(order.getItems()).hasSize(2);
+                                    assertThat(order.getItems())
+                                            .extracting(Item::isActive, Item::getName, Item::getStatus)
+                                            .contains(
+                                                    Tuple.tuple(true, "Apfel", Status.OPEN),
+                                                    Tuple.tuple(false, null, Status.CLOSED));
+
+                                    assertThat(order.getLabels()).hasSize(1);
+                                    assertThat(order.getLabels())
+                                            .extracting(Label::text)
+                                            .contains("rot");
+
+                                    assertThat(order.getNone()).isEmpty();
+
+                                    assertThat(order.getNumbers()).hasSize(2);
+
+                                    assertThat(order.getTags()).hasSize(1);
+                                    assertThat(order.getTags()).contains("eilig");
+                                }
+                        """);
+        assertThat(generatedBlock(rewritten)).doesNotContain("org.", "model.", "generated.", "java.")
+                .doesNotContain("getSameItems", "getPriority", "getInternal");
+
+        compile(source, item, status);
+        try (URLClassLoader loader = fixtureLoader()) {
+            invoke(loader, "run");
+            loader.loadClass("generated.Fixture").getField("changed").setBoolean(null, true);
+            assertThatThrownBy(() -> invoke(loader, "run")).isInstanceOf(AssertionError.class);
+        }
+    }
+
+    @Test
+    void ignoresMembersOfPersistenceProxiesAndNonPublicProperties() throws Throwable {
+        writeSource("org/hibernate/proxy/HibernateProxy.java", """
+                package org.hibernate.proxy;
+                public interface HibernateProxy {
+                    Object getHibernateLazyInitializer();
+                    boolean isSession();
+                }
+                """);
+        writeSource("org/hibernate/collection/PersistentBag.java", """
+                package org.hibernate.collection;
+                public class PersistentBag<E> extends java.util.ArrayList<E> {
+                    public PersistentBag(java.util.Collection<E> values) { super(values); }
+                    public boolean isDirty() { return true; }
+                    public Object getSession() { throw new IllegalStateException("no session"); }
+                }
+                """);
+        Path source = writeFixture("""
+                package generated;
+                import dev.dexray.smarttestutils.SmartTestUtils;
+                public class Fixture {
+                    public static class Customer {
+                        public String getName() { return "Kunde"; }
+                        public java.util.List<String> getPhones() {
+                            return new org.hibernate.collection.PersistentBag<>(java.util.List.of("0123"));
+                        }
+                        protected String getSecret() { return "protected"; }
+                        String getPackageVisible() { return "package"; }
+                        public String $$_hibernate_getEntityEntry() { return "enhanced"; }
+                    }
+                    public static class Customer$HibernateProxy$abc extends Customer
+                            implements org.hibernate.proxy.HibernateProxy {
+                        public Object getHibernateLazyInitializer() { throw new IllegalStateException("proxy"); }
+                        public boolean isSession() { throw new IllegalStateException("isSession"); }
+                        public String getProxyOnly() { throw new IllegalStateException("proxy only"); }
+                    }
+                    public static void run() {
+                        Customer customer = new Customer$HibernateProxy$abc();
+                        SmartTestUtils.createAsserts(customer);
+                    }
+                }
+                """);
+        Path proxy = project.resolve("src/test/java/org/hibernate/proxy/HibernateProxy.java");
+        Path bag = project.resolve("src/test/java/org/hibernate/collection/PersistentBag.java");
+        rewriteAndVerify(source, proxy, bag);
+        assertThat(generatedBlock(Files.readString(source)))
+                .contains("assertThat(customer.getName()).isEqualTo(\"Kunde\");",
+                        "assertThat(customer.getPhones()).hasSize(1);",
+                        "assertThat(customer.getPhones()).contains(\"0123\");")
+                .doesNotContain("Session", "LazyInitializer", "ProxyOnly", "Secret", "PackageVisible", "hibernate_",
+                        "isDirty");
     }
 
     @Test
@@ -143,7 +360,7 @@ class SmartTestUtilsIntegrationTest {
     }
 
     @Test
-    void supportsRecordsFieldsInheritedBooleansAndStandardValueTypesWithTabs() throws Throwable {
+    void supportsRecordsFieldsInheritedBooleansAndIgnoresOtherValueTypesWithTabs() throws Throwable {
         Path source = writeFixture("""
                 package generated;
                 import dev.dexray.smarttestutils.SmartTestUtils;
@@ -188,8 +405,13 @@ class SmartTestUtilsIntegrationTest {
                 }
                 """.replace("    ", "\t"));
         rewriteAndVerify(source);
-        assertThat(Files.readString(source)).contains("bean.title", "bean.getDetail().text()", "bean.isReady()")
-                .doesNotContain("bean.getReady()");
+        assertThat(generatedBlock(Files.readString(source)))
+                .contains("assertThat(bean.title).isEqualTo(\"public field\");",
+                        "assertThat(bean.getDetail().text()).isEqualTo(",
+                        "assertThat(bean.isReady()).isTrue();",
+                        "assertThat(bean.getKind()).isEqualTo(Kind.SPECIAL);")
+                .doesNotContain("bean.getReady()", "getDecimal", "getDate", "getId()", "getZone", "getUnicode",
+                        "number()", "BigDecimal.", "java.time.LocalDate.parse");
     }
 
     @Test
@@ -322,25 +544,35 @@ class SmartTestUtilsIntegrationTest {
     }
 
     private Path writeFixture(String contents) throws IOException {
-        Path source = project.resolve("src/test/java/generated/Fixture.java");
+        return writeSource("generated/Fixture.java", contents);
+    }
+
+    private Path writeSource(String relative, String contents) throws IOException {
+        Path source = project.resolve("src/test/java").resolve(relative);
         Files.createDirectories(source.getParent());
         Files.writeString(source, contents, StandardCharsets.UTF_8);
         return source;
     }
 
-    private void rewriteAndVerify(Path source) throws Throwable {
-        compile(source);
+    /** The text between the first generated assertion and the end of its block. */
+    private static String generatedBlock(String source) {
+        int start = source.indexOf("assertThat(");
+        return source.substring(start, source.indexOf('}', start));
+    }
+
+    private void rewriteAndVerify(Path... sources) throws Throwable {
+        compile(sources);
         try (URLClassLoader loader = fixtureLoader()) {
             invoke(loader, "run");
         }
-        assertThat(Files.readString(source)).doesNotContain("SmartTestUtils.createAsserts(");
-        compile(source);
+        assertThat(Files.readString(sources[0])).doesNotContain("SmartTestUtils.createAsserts(");
+        compile(sources);
         try (URLClassLoader loader = fixtureLoader()) {
             invoke(loader, "run");
         }
     }
 
-    private void compile(Path source) throws IOException {
+    private void compile(Path... sources) throws IOException {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertThat(compiler).as("Integration tests require a JDK").isNotNull();
         Path classes = project.resolve("target/test-classes");
@@ -350,7 +582,7 @@ class SmartTestUtilsIntegrationTest {
             boolean successful = compiler.getTask(null, files, diagnostics,
                     List.of("--release", "17", "-g", "-encoding", "UTF-8", "-classpath",
                             System.getProperty("java.class.path"), "-d", classes.toString()),
-                    null, files.getJavaFileObjects(source.toFile())).call();
+                    null, files.getJavaFileObjects(sources)).call();
             assertThat(successful).as("Generated source must compile: %s", diagnostics.getDiagnostics()).isTrue();
         }
     }

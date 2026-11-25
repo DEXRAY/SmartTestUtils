@@ -127,6 +127,80 @@ class DatabaseSnapshotTest {
     }
 
     @Test
+    void firstSnapshotStoresNoDiff() throws SQLException {
+        snapshot.inMemorySnapshotStart();
+
+        assertThat(snapshot.diffs()).isEmpty();
+    }
+
+    @Test
+    void everyFurtherSnapshotStoresDiffToPreviousSnapshot() throws SQLException {
+        snapshot.inMemorySnapshotStart();
+
+        putRow("PERSON", 4L, 0L);
+        putRow("PERSON", 2L, 4L);
+        snapshot.inMemorySnapshotStart();
+
+        rows.get("PERSON").remove(4L);
+        putRow("LOG_ENTRY", 12L, null);
+        snapshot.inMemorySnapshotStart();
+
+        snapshot.inMemorySnapshotStart();
+
+        List<DatabaseSnapshot.SnapshotDiff> diffs = snapshot.diffs();
+        assertThat(diffs).hasSize(3);
+
+        assertThat(diffs.get(0).tables()).containsOnlyKeys("PERSON");
+        assertThat(diffs.get(0).table("PERSON").inserted()).containsExactly(4L);
+        assertThat(diffs.get(0).table("PERSON").updated()).containsExactly(2L);
+        assertThat(diffs.get(0).table("PERSON").deleted()).isEmpty();
+
+        assertThat(diffs.get(1).tables()).containsOnlyKeys("LOG_ENTRY", "PERSON");
+        assertThat(diffs.get(1).table("PERSON").inserted()).isEmpty();
+        assertThat(diffs.get(1).table("PERSON").updated()).isEmpty();
+        assertThat(diffs.get(1).table("PERSON").deleted()).containsExactly(4L);
+        assertThat(diffs.get(1).table("LOG_ENTRY").inserted()).containsExactly(12L);
+
+        assertThat(diffs.get(2).isEmpty()).isTrue();
+    }
+
+    @Test
+    void snapshotDiffReportsDroppedTablesAndIgnoresNewTables() throws SQLException {
+        snapshot.inMemorySnapshotStart();
+
+        tables.remove("LOG_ENTRY");
+        rows.remove("LOG_ENTRY");
+        addTable("NEW_TABLE", "ID", "VERSION");
+        putRow("NEW_TABLE", 1L, 0L);
+        snapshot.inMemorySnapshotStart();
+
+        DatabaseSnapshot.SnapshotDiff diff = snapshot.diffs().get(0);
+        assertThat(diff.tables()).containsOnlyKeys("LOG_ENTRY");
+        assertThat(diff.table("LOG_ENTRY").deleted()).containsExactly(10L, 11L);
+    }
+
+    @Test
+    void createDiffComparesAgainstLatestSnapshot() throws SQLException {
+        snapshot.inMemorySnapshotStart();
+        putRow("PERSON", 4L, 0L);
+        snapshot.inMemorySnapshotStart();
+
+        putRow("PERSON", 5L, 0L);
+
+        assertThat(snapshot.createDiff().table("PERSON").inserted()).containsExactly(5L);
+        assertThat(snapshot.diffs()).hasSize(1);
+    }
+
+    @Test
+    void storedDiffsCannotBeModified() throws SQLException {
+        snapshot.inMemorySnapshotStart();
+        snapshot.inMemorySnapshotStart();
+
+        assertThatThrownBy(() -> snapshot.diffs().clear()).isInstanceOf(UnsupportedOperationException.class);
+        assertThat(snapshot.diffs()).hasSize(1);
+    }
+
+    @Test
     void createDiffRequiresSnapshotStart() {
         assertThatThrownBy(snapshot::createDiff).isInstanceOf(IllegalStateException.class);
     }

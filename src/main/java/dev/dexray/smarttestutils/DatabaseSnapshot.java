@@ -14,6 +14,8 @@ import java.util.TreeMap;
 
 // Records which rows of the current Oracle user's tables were inserted, updated (VERSION increased)
 // or deleted between inMemorySnapshotStart() and createDiff().
+// Every further call of inMemorySnapshotStart() stores the diff to the previous snapshot (see diffs())
+// and makes the new snapshot the reference for createDiff().
 // Only tables with a single-column integral NUMBER primary key are considered.
 public final class DatabaseSnapshot {
 
@@ -72,6 +74,7 @@ public final class DatabaseSnapshot {
 
     private final Connection connection;
     private Map<TableInfo, Map<Long, Long>> start;
+    private final List<SnapshotDiff> diffs = new ArrayList<>();
 
     public DatabaseSnapshot(Connection connection) {
         this.connection = Objects.requireNonNull(connection, "connection");
@@ -82,7 +85,18 @@ public final class DatabaseSnapshot {
         for (TableInfo table : loadTables().values()) {
             snapshot.put(table, loadRows(table));
         }
+        if (start != null) {
+            Map<String, Map<Long, Long>> after = new HashMap<>();
+            snapshot.forEach((table, rows) -> after.put(table.name(), rows));
+            diffs.add(diff(start, after));
+        }
         start = snapshot;
+    }
+
+    // Diffs between consecutive snapshots in call order: diffs().get(0) compares the first with the
+    // second snapshot. Unchanged intervals are stored as empty diffs, so the indices match the calls.
+    public List<SnapshotDiff> diffs() {
+        return List.copyOf(diffs);
     }
 
     public SnapshotDiff createDiff() throws SQLException {
@@ -90,12 +104,22 @@ public final class DatabaseSnapshot {
             throw new IllegalStateException("inMemorySnapshotStart() must be called before createDiff()");
         }
         Map<String, TableInfo> currentTables = loadTables();
-        Map<String, TableDiff> result = new HashMap<>();
-        for (Map.Entry<TableInfo, Map<Long, Long>> entry : start.entrySet()) {
-            TableInfo table = entry.getKey();
+        Map<String, Map<Long, Long>> current = new HashMap<>();
+        for (TableInfo table : start.keySet()) {
             TableInfo now = currentTables.get(table.name());
-            Map<Long, Long> current = now == null ? Map.of() : loadRows(now);
-            TableDiff diff = diff(table, entry.getValue(), current);
+            if (now != null) {
+                current.put(table.name(), loadRows(now));
+            }
+        }
+        return diff(start, current);
+    }
+
+    // Tables missing in "after" count as dropped (all rows deleted); tables only in "after" are ignored.
+    private static SnapshotDiff diff(Map<TableInfo, Map<Long, Long>> before, Map<String, Map<Long, Long>> after) {
+        Map<String, TableDiff> result = new HashMap<>();
+        for (Map.Entry<TableInfo, Map<Long, Long>> entry : before.entrySet()) {
+            TableInfo table = entry.getKey();
+            TableDiff diff = diff(table, entry.getValue(), after.getOrDefault(table.name(), Map.of()));
             if (!diff.isEmpty()) {
                 result.put(table.name(), diff);
             }

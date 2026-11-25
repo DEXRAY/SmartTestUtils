@@ -2,6 +2,7 @@ package dev.dexray.smarttestutils;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Member;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -14,6 +15,8 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -26,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -35,11 +39,15 @@ import java.util.regex.Pattern;
  * execute the generated assertions.
  *
  * <ul>
- *   <li>Only {@code String}, {@code boolean}/{@code Boolean} and enum values are asserted.</li>
+ *   <li>Only {@code String}, {@code boolean}/{@code Boolean}, enum, {@code LocalDate} and
+ *       {@code LocalDateTime} values are asserted; dates are compared via {@code parse("...")}.</li>
  *   <li>Nested objects are followed recursively (at most three property accesses); every object
  *       is asserted only once, so reference cycles and shared references end the recursion.</li>
- *   <li>Collections get a size assertion followed by an {@code extracting(...)} assertion with
- *       method references and {@code Tuple.tuple(...)} values.</li>
+ *   <li>Collections get a {@code contains(...)} or an {@code extracting(...)} assertion with
+ *       method references and {@code Tuple.tuple(...)} values; {@code hasSize} only when the
+ *       elements cannot be compared.</li>
+ *   <li>An object whose expression is used more than once is stored in a {@code var} first.</li>
+ *   <li>Getters that throw are skipped and documented by a one-line comment.</li>
  *   <li>Only public getters, record components and public fields are used. Members that belong
  *       to persistence proxies or bytecode enhancement (Hibernate, ByteBuddy, ...) are ignored.</li>
  *   <li>The generated code uses simple type names; missing imports are added directly below the
@@ -103,14 +111,23 @@ public final class SmartTestUtils {
             Imports imports = new Imports(current, caller.getDeclaringClass());
             Generator generator = new Generator(imports, unit);
             generator.root(object, placeholder.group(2));
-            List<String> lines = generator.lines();
+            List<List<String>> groups = generator.groups();
+            List<String> lines = new ArrayList<>();
+            for (List<String> group : groups) {
+                if (!lines.isEmpty()) {
+                    lines.add("");
+                }
+                for (String statement : group) {
+                    lines.addAll(Arrays.asList(statement.split("\n", -1)));
+                }
+            }
             if (lines.isEmpty()) {
-                throw new IllegalArgumentException("No String, enum, boolean or collection values found in "
+                throw new IllegalArgumentException("No supported values found in "
                         + placeholder.group(2));
             }
             String newline = current.contains("\r\n") ? "\r\n" : "\n";
             String replacement;
-            if (generator.statements() == 1) {
+            if (groups.size() == 1 && groups.get(0).size() == 1) {
                 replacement = String.join(newline + indent, lines);
             } else {
                 // A block keeps multiple assertions together even inside an unbraced if or loop.
@@ -201,12 +218,58 @@ public final class SmartTestUtils {
         return matches.get(0);
     }
 
-    /** Collects the assertions, one group per asserted object or collection. */
+    /**
+     * Collects the assertions as a tree of nodes, one node per asserted object or collection.
+     * Each node is rendered as its own group; a node whose expression is used more than once
+     * is stored in a local variable first.
+     */
     private static final class Generator {
+        private static final Set<String> KEYWORDS = Set.of("abstract", "assert", "boolean", "break", "byte",
+                "case", "catch", "char", "class", "const", "continue", "default", "do", "double", "else", "enum",
+                "extends", "final", "finally", "float", "for", "goto", "if", "implements", "import", "instanceof",
+                "int", "interface", "long", "native", "new", "package", "private", "protected", "public", "return",
+                "short", "static", "strictfp", "super", "switch", "synchronized", "this", "throw", "throws",
+                "transient", "try", "void", "volatile", "while", "true", "false", "null", "var", "record", "yield",
+                "sealed", "permits", "non", "_");
+
         private final Imports imports;
         private final String continuation;
         private final IdentityHashMap<Object, Boolean> visited = new IdentityHashMap<>();
-        private final List<List<String>> groups = new ArrayList<>();
+        private final Set<String> variables = new HashSet<>();
+        private Node root;
+
+        /** An asserted object or collection; {@code access} is appended to the parent's expression. */
+        private static final class Node {
+            final String access;
+            final String name;
+            final List<Function<String, String>> entries = new ArrayList<>();
+            final List<Node> children = new ArrayList<>();
+            int statements;
+
+            Node(String access, String name) {
+                this.access = access;
+                this.name = name;
+            }
+
+            void statement(Function<String, String> statement) {
+                entries.add(statement);
+                statements++;
+            }
+
+            void comment(Function<String, String> comment) {
+                entries.add(comment);
+            }
+
+            /** How often the node's expression appears in the generated code. */
+            int uses() {
+                int uses = statements;
+                for (Node child : children) {
+                    int childUses = child.uses();
+                    uses += childUses >= 2 ? 1 : childUses;
+                }
+                return uses;
+            }
+        }
 
         Generator(Imports imports, String unit) {
             this.imports = imports;
@@ -214,158 +277,207 @@ public final class SmartTestUtils {
         }
 
         void root(Object value, String expression) {
-            List<String> group = group();
+            root = new Node(expression, null);
             if (value == null) {
-                group.add(assertThat(expression) + ".isNull();");
-            } else if (simple(group, value, value.getClass(), expression)) {
+                root.statement(base -> assertThat(base) + ".isNull();");
+            } else if (simple(root, value, value.getClass(), "")) {
                 return;
             } else if (value instanceof Collection<?> collection) {
-                collection(collection, null, expression);
+                visited.put(collection, Boolean.TRUE);
+                collection(root, collection, null);
             } else if (isBean(userClass(value.getClass()))) {
-                object(value, expression, 0);
+                visited.put(value, Boolean.TRUE);
+                object(root, value, 0);
             } else {
                 throw new IllegalArgumentException("Unsupported value type at " + expression + ": "
                         + value.getClass().getTypeName());
             }
         }
 
-        /** Lines of all non-empty groups, separated by an empty line; continuation lines are pre-indented. */
-        List<String> lines() {
-            List<String> lines = new ArrayList<>();
-            for (List<String> group : groups) {
-                if (group.isEmpty()) {
-                    continue;
-                }
-                if (!lines.isEmpty()) {
-                    lines.add("");
-                }
-                for (String statement : group) {
-                    lines.addAll(Arrays.asList(statement.split("\n", -1)));
-                }
-            }
-            return lines;
+        /** Groups of rendered statements in output order; multi-line statements contain '\n'. */
+        List<List<String>> groups() {
+            List<List<String>> groups = new ArrayList<>();
+            render(root, "", groups);
+            groups.removeIf(List::isEmpty);
+            return groups;
         }
 
-        int statements() {
-            return groups.stream().mapToInt(List::size).sum();
-        }
-
-        private List<String> group() {
+        private void render(Node node, String parent, List<List<String>> groups) {
+            String base = parent + node.access;
             List<String> group = new ArrayList<>();
+            if (node != root && node.uses() >= 2) {
+                String variable = variable(node.name);
+                group.add("var " + variable + " = " + base + ";");
+                base = variable;
+            }
+            for (Function<String, String> entry : node.entries) {
+                group.add(entry.apply(base));
+            }
             groups.add(group);
-            return group;
+            for (Node child : node.children) {
+                render(child, base, groups);
+            }
+        }
+
+        /** A local variable name that does not clash with any identifier of the test source. */
+        private String variable(String name) {
+            String candidate = name;
+            for (int i = 2; KEYWORDS.contains(candidate) || imports.identifiers.contains(candidate)
+                    || !variables.add(candidate); i++) {
+                candidate = name + i;
+            }
+            return candidate;
         }
 
         private String assertThat(String expression) {
             return imports.assertThat() + "(" + expression + ")";
         }
 
-        private void object(Object value, String expression, int depth) {
-            if (visited.put(value, Boolean.TRUE) != null) {
-                return;
-            }
-            List<String> group = group();
+        private void object(Node node, Object value, int depth) {
             List<Runnable> nested = new ArrayList<>();
             for (Property property : properties(userClass(value.getClass()))) {
-                Object child = property.read(value, expression);
-                String access = property.access(expression);
-                if (simple(group, child, property.type(), access)) {
+                String access = property.access("");
+                Object child;
+                try {
+                    child = property.read(value);
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    node.comment(base -> "// " + base + access + " ausgelassen (" + describe(e) + ")");
+                    continue;
+                }
+                if (simple(node, child, property.type(), access)) {
                     continue;
                 }
                 if (child instanceof Collection<?> collection) {
-                    nested.add(() -> collection(collection, property.genericType(), access));
+                    nested.add(() -> {
+                        if (visited.put(collection, Boolean.TRUE) == null) {
+                            Node childNode = new Node(access, property.name());
+                            node.children.add(childNode);
+                            collection(childNode, collection, property.genericType());
+                        }
+                    });
                 } else if (child != null && depth + 1 < MAX_DEPTH && isBean(userClass(child.getClass()))) {
-                    nested.add(() -> object(child, access, depth + 1));
+                    nested.add(() -> {
+                        if (visited.put(child, Boolean.TRUE) == null) {
+                            Node childNode = new Node(access, property.name());
+                            node.children.add(childNode);
+                            object(childNode, child, depth + 1);
+                        }
+                    });
                 }
             }
             // Nested objects follow the object's own values, each in its own group.
             nested.forEach(Runnable::run);
         }
 
-        /** Adds an assertion if the value is a String, boolean or enum; returns false for other values. */
-        private boolean simple(List<String> group, Object value, Class<?> declared, String expression) {
+        /** Adds an assertion if the value has a supported type; returns false for other values. */
+        private boolean simple(Node node, Object value, Class<?> declared, String access) {
             Class<?> type = value == null ? declared : value.getClass();
             if (!isSimple(type)) {
                 return false;
             }
             if (value == null) {
-                group.add(assertThat(expression) + ".isNull();");
+                node.statement(base -> assertThat(base + access) + ".isNull();");
             } else if (value instanceof Boolean flag) {
-                group.add(assertThat(expression) + (flag ? ".isTrue();" : ".isFalse();"));
+                node.statement(base -> assertThat(base + access) + (flag ? ".isTrue();" : ".isFalse();"));
             } else {
                 String literal = literal(value);
                 if (literal != null) {
-                    group.add(assertThat(expression) + ".isEqualTo(" + literal + ");");
+                    node.statement(base -> assertThat(base + access) + ".isEqualTo(" + literal + ");");
                 }
             }
             return true;
         }
 
-        private void collection(Collection<?> collection, Type declared, String expression) {
-            if (visited.put(collection, Boolean.TRUE) != null) {
-                return;
-            }
-            List<String> group = group();
+        private void collection(Node node, Collection<?> collection, Type declared) {
             if (collection.isEmpty()) {
-                group.add(assertThat(expression) + ".isEmpty();");
+                node.statement(base -> assertThat(base) + ".isEmpty();");
                 return;
             }
-            group.add(assertThat(expression) + ".hasSize(" + collection.size() + ");");
             List<Object> elements = new ArrayList<>(collection);
-            Class<?> element = elementType(declared, elements);
+            String contents = contents(node, elements, elementType(declared, elements));
+            if (contents == null) {
+                // The elements cannot be compared, so at least their number is checked.
+                node.statement(base -> assertThat(base) + ".hasSize(" + elements.size() + ");");
+            } else {
+                node.statement(base -> assertThat(base) + contents);
+            }
+        }
+
+        /** The assertion suffix comparing the elements, or null if they cannot be compared. */
+        private String contents(Node node, List<Object> elements, Class<?> element) {
             if (element == null) {
-                return;
+                return null;
             }
             if (isSimple(element)) {
                 List<String> values = new ArrayList<>();
                 for (Object value : elements) {
                     String literal = value == null ? "null" : literal(value);
                     if (literal == null) {
-                        return;
+                        return null;
                     }
                     values.add(literal);
                 }
-                group.add(assertThat(expression) + ".contains(" + nullSafe(values, element) + ");");
-                return;
+                return ".contains(" + nullSafe(values, element) + ");";
             }
             if (!isBean(element) || elements.contains(null)) {
-                return;
+                return null;
             }
             List<Property> extracted = new ArrayList<>();
+            List<List<String>> columns = new ArrayList<>();
             for (Property property : properties(element)) {
-                if (isSimple(property.type()) && (!property.type().isEnum() || imports.reference(property.type()) != null)) {
+                if (!isSimple(property.type()) || (isNamedType(property.type())
+                        && imports.reference(property.type()) == null)) {
+                    continue;
+                }
+                List<String> column = new ArrayList<>();
+                try {
+                    for (Object item : elements) {
+                        Object value = property.read(item);
+                        String literal = value == null ? "null" : literal(value);
+                        if (literal == null) {
+                            column = null;
+                            break;
+                        }
+                        column.add(literal);
+                    }
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    String reference = extractor(element.getSimpleName(), property);
+                    node.comment(base -> "// " + reference + " ausgelassen (" + describe(e) + ")");
+                    continue;
+                }
+                if (column != null) {
                     extracted.add(property);
+                    columns.add(column);
                 }
             }
             String elementName = extracted.isEmpty() ? null : imports.reference(element);
             if (elementName == null) {
-                return;
+                return null;
             }
             List<String> rows = new ArrayList<>();
-            for (Object item : elements) {
+            for (int row = 0; row < elements.size(); row++) {
                 List<String> values = new ArrayList<>();
-                for (Property property : extracted) {
-                    Object value = property.read(item, expression + "[element]");
-                    String literal = value == null ? "null" : literal(value);
-                    if (literal == null) {
-                        return;
-                    }
-                    values.add(literal);
+                for (List<String> column : columns) {
+                    values.add(column.get(row));
                 }
                 rows.add(extracted.size() == 1 ? values.get(0)
                         : imports.reference(TUPLE) + ".tuple(" + String.join(", ", values) + ")");
             }
             List<String> extractors = new ArrayList<>();
             for (Property property : extracted) {
-                extractors.add(property.member() instanceof Method method ? elementName + "::" + method.getName()
-                        : "(" + elementName + " element) -> element." + property.member().getName());
+                extractors.add(extractor(elementName, property));
             }
             String contains = extracted.size() == 1
                     ? ".contains(" + nullSafe(rows, extracted.get(0).type()) + ");"
                     : ".contains(\n" + continuation + continuation
                             + String.join(",\n" + continuation + continuation, rows) + ");";
-            group.add(assertThat(expression) + "\n" + continuation + ".extracting(" + String.join(", ", extractors)
-                    + ")\n" + continuation + contains);
+            return "\n" + continuation + ".extracting(" + String.join(", ", extractors) + ")\n"
+                    + continuation + contains;
+        }
+
+        private static String extractor(String elementName, Property property) {
+            return property.member() instanceof Method method ? elementName + "::" + method.getName()
+                    : "(" + elementName + " element) -> element." + property.member().getName();
         }
 
         /** A single {@code null} vararg must be cast, otherwise it is passed as a null array. */
@@ -416,27 +528,36 @@ public final class SmartTestUtils {
                 String type = imports.reference(constant.getDeclaringClass());
                 return type == null ? null : type + "." + constant.name();
             }
+            if (value instanceof LocalDate || value instanceof LocalDateTime) {
+                return imports.reference(value.getClass()) + ".parse(" + quote(value.toString(), '"') + ")";
+            }
             return null;
+        }
+
+        /** A single-line description of a getter failure for the generated comment. */
+        private static String describe(Throwable failure) {
+            Throwable cause = failure instanceof InvocationTargetException invocation
+                    && invocation.getCause() != null ? invocation.getCause() : failure;
+            String text = cause.getClass().getSimpleName()
+                    + (cause.getMessage() == null ? "" : ": " + cause.getMessage());
+            text = text.replaceAll("\\s+", " ").strip();
+            return text.length() > 120 ? text.substring(0, 117) + "..." : text;
         }
     }
 
-    private record Property(Member member, Class<?> type, Type genericType) {
-        Object read(Object target, String expression) {
-            try {
-                if (member instanceof Method getter) {
-                    if (!getter.canAccess(target) && !getter.trySetAccessible()) {
-                        throw new IllegalAccessException("Getter is inaccessible");
-                    }
-                    return getter.invoke(target);
+    private record Property(String name, Member member, Class<?> type, Type genericType) {
+        Object read(Object target) throws ReflectiveOperationException {
+            if (member instanceof Method getter) {
+                if (!getter.canAccess(target) && !getter.trySetAccessible()) {
+                    throw new IllegalAccessException("Getter is inaccessible");
                 }
-                Field field = (Field) member;
-                if (!field.canAccess(target) && !field.trySetAccessible()) {
-                    throw new IllegalAccessException("Field is inaccessible");
-                }
-                return field.get(target);
-            } catch (ReflectiveOperationException | RuntimeException e) {
-                throw new IllegalStateException("Cannot read property " + access(expression), e);
+                return getter.invoke(target);
             }
+            Field field = (Field) member;
+            if (!field.canAccess(target) && !field.trySetAccessible()) {
+                throw new IllegalAccessException("Field is inaccessible");
+            }
+            return field.get(target);
         }
 
         String access(String expression) {
@@ -444,8 +565,14 @@ public final class SmartTestUtils {
         }
     }
 
+    /** String, boolean, enum, LocalDate and LocalDateTime values are asserted directly. */
     private static boolean isSimple(Class<?> type) {
-        return type == String.class || type == boolean.class || type == Boolean.class
+        return type == String.class || type == boolean.class || type == Boolean.class || isNamedType(type);
+    }
+
+    /** Supported value types whose literal needs a type name (and possibly an import). */
+    private static boolean isNamedType(Class<?> type) {
+        return type == LocalDate.class || type == LocalDateTime.class
                 || (type != null && type.isEnum())
                 || (type != null && type.getSuperclass() != null && type.getSuperclass().isEnum());
     }
@@ -485,7 +612,7 @@ public final class SmartTestUtils {
             for (var component : type.getRecordComponents()) {
                 Method accessor = component.getAccessor();
                 properties.put(component.getName(),
-                        new Property(accessor, accessor.getReturnType(), accessor.getGenericReturnType()));
+                        new Property(component.getName(), accessor, accessor.getReturnType(), accessor.getGenericReturnType()));
             }
             return List.copyOf(properties.values());
         }
@@ -505,7 +632,7 @@ public final class SmartTestUtils {
                 property = decapitalize(name.substring(2));
             }
             if (property != null) {
-                properties.put(property, new Property(method, method.getReturnType(), method.getGenericReturnType()));
+                properties.put(property, new Property(property, method, method.getReturnType(), method.getGenericReturnType()));
             }
         });
         Arrays.stream(type.getFields()).filter(field -> Modifier.isPublic(field.getModifiers())
@@ -513,7 +640,7 @@ public final class SmartTestUtils {
                 && !hidden(field.getName(), field.getDeclaringClass()))
                 .sorted(Comparator.comparing(Field::getName))
                 .forEach(field -> properties.putIfAbsent(field.getName(),
-                        new Property(field, field.getType(), field.getGenericType())));
+                        new Property(field.getName(), field, field.getType(), field.getGenericType())));
         return List.copyOf(properties.values());
     }
 
@@ -534,6 +661,8 @@ public final class SmartTestUtils {
         private final Map<String, String> existing = new HashMap<>();
         private final Set<String> existingStatic = new HashSet<>();
         private final Set<String> declared = new HashSet<>();
+        /** Every identifier of the test source; generated variables must not shadow or clash with them. */
+        private final Set<String> identifiers = new HashSet<>();
         private final Map<String, String> added = new TreeMap<>();
         private final Set<String> addedStatic = new TreeSet<>();
         private String assertThat;
@@ -557,6 +686,10 @@ public final class SmartTestUtils {
             Matcher declarations = DECLARATION.matcher(source);
             while (declarations.find()) {
                 declared.add(declarations.group(1));
+            }
+            Matcher words = Pattern.compile(IDENTIFIER).matcher(source);
+            while (words.find()) {
+                identifiers.add(words.group());
             }
         }
 

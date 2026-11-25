@@ -52,13 +52,17 @@ Beim Ausführen wird ausschließlich die Platzhalter-Anweisung ersetzt, beispiel
 
 ```java
 {
+    assertThat(order.getCreated()).isEqualTo(LocalDate.parse("2024-02-29"));
     assertThat(order.getNumber()).isEqualTo("A-1");
-    assertThat(order.isPaid()).isTrue();
-    assertThat(order.getStatus()).isEqualTo(Status.OPEN);
 
-    assertThat(order.getCustomer().getName()).isEqualTo("Kunde");
+    var customer = order.getCustomer();
+    assertThat(customer.getLastLogin()).isEqualTo(LocalDateTime.parse("2024-02-29T08:15:30"));
+    assertThat(customer.getName()).isEqualTo("Kunde");
+    assertThat(customer.isVip()).isTrue();
 
-    assertThat(order.getItems()).hasSize(2);
+    assertThat(customer.getAddresses()).contains("Hauptstr. 1");
+
+    // Item::getCode ausgelassen (IllegalStateException: kein Code)
     assertThat(order.getItems())
             .extracting(Item::isActive, Item::getName, Item::getStatus)
             .contains(
@@ -80,9 +84,13 @@ Der Generator selbst verwendet ausschließlich das JDK.
 
 ## Unterstützte Properties und Werte
 
-- Assertions werden nur für `String`, `boolean`/`Boolean` und Enums erzeugt (`isEqualTo`,
-  `isTrue`/`isFalse`, `isNull`). Andere Werte (Zahlen, Datumswerte, `char`, Maps, Arrays, ...)
-  werden ignoriert.
+- Assertions werden nur für `String`, `boolean`/`Boolean`, Enums, `LocalDate` und `LocalDateTime`
+  erzeugt (`isEqualTo`, `isTrue`/`isFalse`, `isNull`). Datumswerte werden über
+  `LocalDate.parse("...")` bzw. `LocalDateTime.parse("...")` verglichen. Andere Werte (Zahlen,
+  andere Datumstypen, `char`, Maps, Arrays, ...) werden ignoriert.
+- Wirft ein Getter eine Exception, wird er übersprungen und im generierten Code durch einen
+  einzeiligen Kommentar dokumentiert, z. B.
+  `// bean.getFailure() ausgelassen (IllegalStateException: getter failed)`.
 - Es werden ausschließlich öffentliche Properties verwendet: öffentliche JavaBean-Getter
   (`getName()`, `isEnabled()`), einschließlich geerbter Getter, Record-Komponenten und öffentliche
   Instanzfelder. Statische, geschützte, package-private und private Member werden ausgelassen.
@@ -100,10 +108,13 @@ bei booleschen Properties hat `isX()` Vorrang vor `getX()`.
 Das Wurzelobjekt hat Tiefe 0. Verschachtelte Objekte werden rekursiv ausgewertet, höchstens drei
 Property-Zugriffe tief, beispielsweise `object.getAddress().getCity().getName()`. Jedes Objekt
 und jede Collection bildet eine eigene Gruppe von Assertions; Gruppen sind durch eine Leerzeile
-getrennt. Ein Objekt, für das bereits Assertions erzeugt wurden, wird nicht erneut ausgewertet,
+getrennt. Wird der Ausdruck eines Objekts mehr als einmal benötigt, wird er zuerst in einer
+lokalen Variable gespeichert (`var customer = order.getCustomer();`), damit der Getter nicht
+wiederholt aufgerufen wird. Der Variablenname wird aus dem Property-Namen gebildet; kommt der
+Name in der Testdatei bereits vor, wird eine Zahl angehängt (`address2`). Ein Objekt, für das bereits Assertions erzeugt wurden, wird nicht erneut ausgewertet,
 so dass Referenzzyklen und gemeinsam genutzte Referenzen keine doppelten Assertions erzeugen.
 
-Für eine Collection wird zuerst `hasSize(n)` bzw. `isEmpty()` erzeugt. Anschließend:
+Eine leere Collection wird mit `isEmpty()` geprüft. Sonst wird der Inhalt verglichen:
 
 - Elemente vom Typ `String`, `Boolean` oder Enum: `contains(...)` mit allen Werten.
 - Andere Elemente: `extracting(...)` mit Methodenreferenzen auf alle `String`-, `boolean`- und
@@ -112,7 +123,9 @@ Für eine Collection wird zuerst `hasSize(n)` bzw. `isEmpty()` erzeugt. Anschlie
 
 Die Element-Klasse wird aus dem generischen Rückgabetyp des Getters bestimmt (`List<Item>`),
 sonst aus der gemeinsamen Klasse der Elemente. Die Elemente selbst werden nicht weiter rekursiv
-ausgewertet. Enthält die Collection `null`-Elemente, wird nur die Größe geprüft.
+ausgewertet. Lässt sich der Inhalt nicht vergleichen (z. B. Zahlen oder `null`-Elemente), wird
+stattdessen nur `hasSize(n)` erzeugt. Wirft ein Getter der Elemente eine Exception, wird diese
+Property per Kommentar ausgelassen.
 
 ## Quelltext-Suche und Grenzen
 
@@ -132,5 +145,4 @@ mvn -Dsmarttestutils.projectRoot=/pfad/zum/projekt test
 Getter müssen über den deklarierten Typ der Variablen erreichbar sein und deterministische
 Werte liefern. Ist die Wurzel selbst eine Collection, muss die Variable mit dem passenden
 Elementtyp deklariert sein (z. B. `List<Item>`). Maps und Arrays benötigen eigene Assertions. Der Generator
-liest zuerst alle Werte und ersetzt die Datei anschließend atomar. Scheitert ein Getter,
-bleibt der Platzhalter für den nächsten Versuch erhalten.
+liest zuerst alle Werte und ersetzt die Datei anschließend atomar.

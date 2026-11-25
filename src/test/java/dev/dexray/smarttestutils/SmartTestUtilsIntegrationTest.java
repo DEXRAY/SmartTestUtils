@@ -89,8 +89,9 @@ class SmartTestUtilsIntegrationTest {
                                     assertThat(bean.getName()).isEqualTo("TestName");
                                     assertThat(bean.getState()).isEqualTo(State.READY);
 
-                                    assertThat(bean.getChild().getDeep().getLabel()).isEqualTo("Depth3");
-                                    assertThat(bean.getChild().getDeep().isVisible()).isFalse();
+                                    var deep = bean.getChild().getDeep();
+                                    assertThat(deep.getLabel()).isEqualTo("Depth3");
+                                    assertThat(deep.isVisible()).isFalse();
                                 }
                         """);
         assertThat(generatedBlock(rewritten)).doesNotContain("org.", "generated.", "java.")
@@ -203,6 +204,10 @@ class SmartTestUtilsIntegrationTest {
                     public String getName() { return name; }
                     public Status getStatus() { return status; }
                     public boolean isActive() { return active; }
+                    public String getCode() {
+                        if (name == null) throw new IllegalStateException("kein Code");
+                        return name;
+                    }
                     public int getPriority() { return 7; }
                     protected String getInternal() { return "hidden"; }
                 }
@@ -216,10 +221,21 @@ class SmartTestUtilsIntegrationTest {
                 import model.Status;
                 public class Fixture {
                     public static boolean changed;
+                    public static class Customer {
+                        public String getName() { return "Kunde"; }
+                        public boolean isVip() { return true; }
+                        public java.time.LocalDateTime getLastLogin() {
+                            return java.time.LocalDateTime.of(2024, 2, 29, 8, 15, 30);
+                        }
+                        public List<String> getAddresses() { return List.of("Hauptstr. 1"); }
+                    }
                     public static class Order {
                         private final List<Item> items = List.of(new Item("Apfel", Status.OPEN, true),
                                 new Item(changed ? "Birne" : null, Status.CLOSED, false));
+                        private final Customer buyer = new Customer();
                         public String getNumber() { return "A-1"; }
+                        public java.time.LocalDate getCreated() { return java.time.LocalDate.of(2024, 2, 29); }
+                        public Customer getCustomer() { return buyer; }
                         public List<Item> getItems() { return items; }
                         public List<Item> getSameItems() { return items; }
                         public List<Status> getHistory() { return List.of(Status.OPEN, Status.CLOSED); }
@@ -247,24 +263,32 @@ class SmartTestUtilsIntegrationTest {
                         package generated;
 
                         import static org.assertj.core.api.Assertions.assertThat;
+                        import java.time.LocalDate;
+                        import java.time.LocalDateTime;
                         import org.assertj.core.groups.Tuple;
                         import dev.dexray.smarttestutils.SmartTestUtils;
                         """)
                 .contains("""
                                 {
+                                    assertThat(order.getCreated()).isEqualTo(LocalDate.parse("2024-02-29"));
                                     assertThat(order.getNumber()).isEqualTo("A-1");
 
-                                    assertThat(order.getHistory()).hasSize(2);
+                                    var customer = order.getCustomer();
+                                    assertThat(customer.getLastLogin()).isEqualTo(LocalDateTime.parse("2024-02-29T08:15:30"));
+                                    assertThat(customer.getName()).isEqualTo("Kunde");
+                                    assertThat(customer.isVip()).isTrue();
+
+                                    assertThat(customer.getAddresses()).contains("Hauptstr. 1");
+
                                     assertThat(order.getHistory()).contains(Status.OPEN, Status.CLOSED);
 
-                                    assertThat(order.getItems()).hasSize(2);
+                                    // Item::getCode ausgelassen (IllegalStateException: kein Code)
                                     assertThat(order.getItems())
                                             .extracting(Item::isActive, Item::getName, Item::getStatus)
                                             .contains(
                                                     Tuple.tuple(true, "Apfel", Status.OPEN),
                                                     Tuple.tuple(false, null, Status.CLOSED));
 
-                                    assertThat(order.getLabels()).hasSize(1);
                                     assertThat(order.getLabels())
                                             .extracting(Label::text)
                                             .contains("rot");
@@ -273,12 +297,11 @@ class SmartTestUtilsIntegrationTest {
 
                                     assertThat(order.getNumbers()).hasSize(2);
 
-                                    assertThat(order.getTags()).hasSize(1);
                                     assertThat(order.getTags()).contains("eilig");
                                 }
                         """);
         assertThat(generatedBlock(rewritten)).doesNotContain("org.", "model.", "generated.", "java.")
-                .doesNotContain("getSameItems", "getPriority", "getInternal");
+                .doesNotContain("getSameItems", "getPriority", "getInternal", "hasSize(1)");
 
         compile(source, item, status);
         try (URLClassLoader loader = fixtureLoader()) {
@@ -286,6 +309,31 @@ class SmartTestUtilsIntegrationTest {
             loader.loadClass("generated.Fixture").getField("changed").setBoolean(null, true);
             assertThatThrownBy(() -> invoke(loader, "run")).isInstanceOf(AssertionError.class);
         }
+    }
+
+    @Test
+    void avoidsVariableNamesThatAlreadyExistInTheTest() throws Throwable {
+        Path source = writeFixture("""
+                package generated;
+                import dev.dexray.smarttestutils.SmartTestUtils;
+                public class Fixture {
+                    public static class Address {
+                        public String getCity() { return "Berlin"; }
+                        public String getStreet() { return "Hauptstr."; }
+                    }
+                    public static class Person {
+                        public Address getAddress() { return new Address(); }
+                    }
+                    public static void run() {
+                        String address = "local";
+                        Person person = new Person();
+                        SmartTestUtils.createAsserts(person);
+                    }
+                }
+                """);
+        rewriteAndVerify(source);
+        assertThat(generatedBlock(Files.readString(source)))
+                .contains("var address2 = person.getAddress();", "assertThat(address2.getCity())");
     }
 
     @Test
@@ -335,10 +383,9 @@ class SmartTestUtilsIntegrationTest {
         rewriteAndVerify(source, proxy, bag);
         assertThat(generatedBlock(Files.readString(source)))
                 .contains("assertThat(customer.getName()).isEqualTo(\"Kunde\");",
-                        "assertThat(customer.getPhones()).hasSize(1);",
                         "assertThat(customer.getPhones()).contains(\"0123\");")
                 .doesNotContain("Session", "LazyInitializer", "ProxyOnly", "Secret", "PackageVisible", "hibernate_",
-                        "isDirty");
+                        "isDirty", "hasSize", "ausgelassen");
     }
 
     @Test
@@ -409,8 +456,10 @@ class SmartTestUtilsIntegrationTest {
                 .contains("assertThat(bean.title).isEqualTo(\"public field\");",
                         "assertThat(bean.getDetail().text()).isEqualTo(",
                         "assertThat(bean.isReady()).isTrue();",
-                        "assertThat(bean.getKind()).isEqualTo(Kind.SPECIAL);")
-                .doesNotContain("bean.getReady()", "getDecimal", "getDate", "getId()", "getZone", "getUnicode",
+                        "assertThat(bean.getKind()).isEqualTo(Kind.SPECIAL);",
+                        "assertThat(bean.getDate()).isEqualTo(LocalDate.parse(\"2024-02-29\"));",
+                        "assertThat(bean.getDateTime()).isEqualTo(LocalDateTime.parse(\"2024-02-29T12:34\"));")
+                .doesNotContain("bean.getReady()", "getDecimal", "getTime()", "getId()", "getZone", "getUnicode",
                         "number()", "BigDecimal.", "java.time.LocalDate.parse");
     }
 
@@ -430,7 +479,7 @@ class SmartTestUtilsIntegrationTest {
     }
 
     @Test
-    void leavesOriginalSourceUntouchedWhenGetterFails() throws Exception {
+    void skipsFailingGettersWithAComment() throws Throwable {
         Path source = writeFixture("""
                 package generated;
                 import dev.dexray.smarttestutils.SmartTestUtils;
@@ -441,11 +490,17 @@ class SmartTestUtilsIntegrationTest {
                     }
                     public static class Bean {
                         public String getBeforeFailure() { return "okay"; }
-                        public String getFailure() { throw new IllegalStateException("getter failed"); }
+                        public String getFailure() { throw new IllegalStateException("getter\\nfailed"); }
                     }
                 }
                 """);
-        assertRewriteRejectedWithoutChanges(source);
+        rewriteAndVerify(source);
+        assertThat(Files.readString(source)).contains("""
+                        {
+                            assertThat(bean.getBeforeFailure()).isEqualTo("okay");
+                            // bean.getFailure() ausgelassen (IllegalStateException: getter failed)
+                        }
+                """);
     }
 
     @Test
@@ -554,9 +609,13 @@ class SmartTestUtilsIntegrationTest {
         return source;
     }
 
-    /** The text between the first generated assertion and the end of its block. */
+    /** The text between the first generated statement and the end of its block. */
     private static String generatedBlock(String source) {
         int start = source.indexOf("assertThat(");
+        int variable = source.indexOf(" var ");
+        if (variable >= 0 && variable < start) {
+            start = variable + 1;
+        }
         return source.substring(start, source.indexOf('}', start));
     }
 
